@@ -109,6 +109,17 @@ def test_multiclass_not_fitted(cls):
         m.decision_function(X)
 
 
+def test_ovo_single_class():
+    X = cp.arange(12, dtype=cp.float32).reshape(6, 2)
+    y = cp.full(6, 7, dtype=cp.int32)
+
+    with pytest.raises(
+        ValueError,
+        match="only one class is present",
+    ):
+        cu_multiclass.OneVsOneClassifier(cuLog()).fit(X, y)
+
+
 def test_ovr_single_class():
     X = cp.arange(12, dtype=cp.float32).reshape(6, 2)
     y = cp.full(6, 7, dtype=cp.int32)

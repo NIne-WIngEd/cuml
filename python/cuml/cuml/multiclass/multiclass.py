@@ -292,7 +292,7 @@ class _BaseMulticlassClassifier(ClassifierMixin, Base):
             pred = []
             conf = []
 
-            for est, Xi in zip(self.estimators_, Xs):
+            for est, Xi in zip(self.estimators_, Xs, strict=True):
                 p = est.predict(Xi)
 
                 if isinstance(p, ClassLabels):
