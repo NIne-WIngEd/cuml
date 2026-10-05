@@ -11,7 +11,7 @@ from cuml.preprocessing._target_encoder import TargetEncoder
 from cuml.testing.utils import array_equal
 
 # TODO: many of these tests use `output_type="numpy"` to work around
-# https://github.com/rapidsai/cuml/issues/7893. These can be
+# https://github.com/NVIDIA/cuml/issues/7893. These can be
 # reverted once that's resolved.
 
 
@@ -197,6 +197,7 @@ def test_targetencoder_smooth():
     )
     smooths = [0, 1, 2, 10000]
     for smooth, answer in zip(smooths, answers):
+        answer = np.array(answer)[:, None]
         encoder = TargetEncoder(smooth=smooth)
         train_encoded = encoder.fit_transform(train, label)
         assert array_equal(train_encoded, answer)

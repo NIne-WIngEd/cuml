@@ -256,14 +256,16 @@ def test_make_blobs_cluster_std_sequence_compatibility():
         n_samples=64,
         n_features=2,
         centers=ctr,
-        cluster_std=[0.0, 0.0],
+        cluster_std=[0.0, 0.8],
         shuffle=True,
         random_state=9,
         dtype="float32",
     )
 
     exp = ctr[labels.astype(cp.int64)]
-    cp.testing.assert_array_equal(out, exp)
+    cp.testing.assert_array_equal(out[labels == 0], exp[labels == 0])
+    assert bool(cp.any(labels == 1))
+    assert bool(cp.any(out[labels == 1] != exp[labels == 1]))
 
 
 def test_make_blobs_zero_samples_compatibility():
