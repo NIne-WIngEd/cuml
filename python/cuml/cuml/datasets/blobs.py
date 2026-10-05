@@ -263,6 +263,8 @@ def make_blobs(
     """
     dt = cp.dtype(dtype)
 
+    # RAFT currently indexes sequence cluster_std by sample row, not label.
+    # Keep per-cluster values on the CuPy path until the native indexing is fixed.
     use_cpp = (
         isinstance(n_samples, numbers.Integral)
         and isinstance(n_features, numbers.Integral)
