@@ -5,6 +5,8 @@ import warnings
 
 import cupy as cp
 import cupyx.scipy.sparse as cp_sp
+from sklearn.base import clone, is_classifier, is_regressor
+from sklearn.utils import get_tags
 
 from cuml.common.doc_utils import generate_docstring
 from cuml.internals.base import Base
@@ -18,19 +20,44 @@ class _ConstantPredictor:
         return cp.zeros(X.shape[0], dtype=cp.int32)
 
     def decision_function(self, X):
-        return cp.zeros(X.shape[0], dtype=cp.int32)
+        return cp.zeros(X.shape[0], dtype=cp.float64)
+
+
+def _predict_binary(est, X):
+    if is_regressor(est):
+        return cp.asarray(est.predict(X)).ravel()
+    try:
+        return cp.asarray(est.decision_function(X)).ravel()
+    except (AttributeError, NotImplementedError):
+        return cp.asarray(est.predict_proba(X))[:, 1]
+
+
+def _binary_threshold(est):
+    if hasattr(est, "decision_function") and is_classifier(est):
+        return 0.0
+    return 0.5
+
+
+def _ovr_decision_function(pred, score, n_cls):
+    n = pred.shape[0]
+    conf = cp.zeros((n, n_cls))
+    votes = cp.zeros((n, n_cls))
+    k = 0
+    for i in range(n_cls):
+        for j in range(i + 1, n_cls):
+            conf[:, i] -= score[:, k]
+            conf[:, j] += score[:, k]
+            votes[pred[:, k] == 0, i] += 1
+            votes[pred[:, k] == 1, j] += 1
+            k += 1
+    conf /= 3 * (cp.abs(conf) + 1)
+    return votes + conf
 
 
 class _BaseMulticlassClassifier(ClassifierMixin, Base):
-    """Shared base class for multiclass classifiers."""
+    """Shared constructor and fitted-state contract for multiclass classifiers."""
 
-    def __init__(
-        self,
-        estimator,
-        *,
-        verbose=False,
-        output_type=None,
-    ):
+    def __init__(self, estimator, *, verbose=False, output_type=None):
         super().__init__(verbose=verbose, output_type=output_type)
         self.estimator = estimator
 
@@ -42,283 +69,6 @@ class _BaseMulticlassClassifier(ClassifierMixin, Base):
     def classes_(self):
         check_is_fitted(self)
         return self._classes
-
-    @staticmethod
-    def _predict_binary(est, X):
-        from sklearn.base import is_regressor
-
-        if is_regressor(est):
-            return cp.asarray(est.predict(X)).ravel()
-
-        try:
-            return cp.asarray(est.decision_function(X)).ravel()
-        except (AttributeError, NotImplementedError):
-            return cp.asarray(est.predict_proba(X))[:, 1]
-
-    @staticmethod
-    def _threshold_for_binary_predict(est):
-        from sklearn.base import is_classifier
-
-        if hasattr(est, "decision_function") and is_classifier(est):
-            return 0.0
-        return 0.5
-
-    def _fit_ovr(self, X, y):
-        from sklearn.base import clone
-
-        X, y, self._classes = check_inputs(
-            self,
-            X,
-            y,
-            dtype=("float32", "float64"),
-            y_dtype=None,
-            accept_sparse=True,
-            reset=True,
-            mem_type="device",
-            return_classes=True,
-        )
-
-        n_cls = len(self._classes)
-
-        if n_cls == 1:
-            warnings.warn(
-                f"Label not {self._classes[0]} is present in all "
-                "training examples.",
-                stacklevel=2,
-            )
-            self.estimators_ = [_ConstantPredictor()]
-            return self
-
-        ids = (1,) if n_cls == 2 else range(n_cls)
-
-        self.estimators_ = [
-            clone(self.estimator).fit(X, (y == i).astype(cp.int32))
-            for i in ids
-        ]
-        return self
-
-    def _fit_ovo(self, X, y):
-        from sklearn.base import clone
-        from sklearn.utils import get_tags
-
-        X, y, self._classes = check_inputs(
-            self,
-            X,
-            y,
-            dtype=("float32", "float64"),
-            y_dtype=None,
-            accept_sparse=True,
-            reset=True,
-            mem_type="device",
-            return_classes=True,
-        )
-
-        n_cls = len(self._classes)
-
-        if n_cls == 1:
-            raise ValueError(
-                "OneVsOneClassifier can not be fit when only one class is "
-                "present."
-            )
-
-        pw = get_tags(self.estimator).input_tags.pairwise
-
-        if cp_sp.issparse(X):
-            X = X.tocsr()
-
-        self.estimators_ = []
-        self.pairwise_indices_ = [] if pw else None
-
-        for i in range(n_cls):
-            for j in range(i + 1, n_cls):
-                idx = cp.flatnonzero((y == i) | (y == j))
-                Xi = X[idx]
-
-                if pw:
-                    Xi = Xi[:, idx]
-                    self.pairwise_indices_.append(idx)
-
-                yi = (y[idx] == j).astype(cp.int32)
-
-                self.estimators_.append(clone(self.estimator).fit(Xi, yi))
-
-        return self
-
-    @staticmethod
-    def _ovr_decision_function(pred, score, n_cls):
-        n = pred.shape[0]
-
-        conf = cp.zeros((n, n_cls))
-        votes = cp.zeros((n, n_cls))
-
-        k = 0
-
-        for i in range(n_cls):
-            for j in range(i + 1, n_cls):
-                conf[:, i] -= score[:, k]
-                conf[:, j] += score[:, k]
-
-                votes[pred[:, k] == 0, i] += 1
-                votes[pred[:, k] == 1, j] += 1
-
-                k += 1
-
-        conf /= 3 * (cp.abs(conf) + 1)
-
-        return votes + conf
-
-    @generate_docstring(y="dense_anydtype")
-    @mlfunc(set_input_type=True)
-    def fit(self, X, y) -> "_BaseMulticlassClassifier":
-        """
-        Fit a multiclass classifier.
-        """
-        if self.strategy == "ovr":
-            return self._fit_ovr(X, y)
-
-        if self.strategy == "ovo":
-            return self._fit_ovo(X, y)
-
-        raise ValueError(
-            f"Expected `strategy` to be one of ['ovo', 'ovr'], "
-            f"got {self.strategy}"
-        )
-
-    @generate_docstring(
-        return_values={
-            "name": "preds",
-            "type": "dense",
-            "description": "Predicted values",
-            "shape": "(n_samples, 1)",
-        }
-    )
-    @mlfunc(preserve_index=True)
-    def predict(self, X):
-        """
-        Predict using multi class classifier.
-        """
-        check_is_fitted(self)
-
-        if self.strategy == "ovr":
-            X = check_inputs(
-                self,
-                X,
-                dtype=("float32", "float64"),
-                accept_sparse=True,
-                mem_type="device",
-            )
-
-            if len(self.estimators_) == 1:
-                est = self.estimators_[0]
-                scr = self._predict_binary(est, X)
-                cut = self._threshold_for_binary_predict(est)
-                idx = (scr > cut).astype(cp.intp)
-            else:
-                scr = cp.column_stack(
-                    [self._predict_binary(est, X) for est in self.estimators_]
-                )
-                idx = cp.argmax(scr, axis=1)
-
-            return ClassLabels(idx, self._classes)
-
-        if self.strategy == "ovo":
-            scr = self.decision_function(X)
-
-            if len(self._classes) == 2:
-                cut = self._threshold_for_binary_predict(self.estimators_[0])
-                idx = (scr > cut).astype(cp.intp)
-            else:
-                idx = cp.argmax(scr, axis=1)
-
-            return ClassLabels(idx, self._classes)
-
-        raise ValueError(
-            f"Expected `strategy` to be one of ['ovo', 'ovr'], "
-            f"got {self.strategy}"
-        )
-
-    @generate_docstring(
-        return_values={
-            "name": "results",
-            "type": "dense",
-            "description": "Decision function values",
-            "shape": "(n_samples, 1)",
-        }
-    )
-    @mlfunc(preserve_index=True)
-    def decision_function(self, X):
-        """
-        Calculate the decision function.
-        """
-        check_is_fitted(self)
-
-        if self.strategy == "ovr":
-            X = check_inputs(
-                self,
-                X,
-                dtype=("float32", "float64"),
-                accept_sparse=True,
-                mem_type="device",
-            )
-
-            if len(self.estimators_) == 1:
-                return cp.asarray(
-                    self.estimators_[0].decision_function(X)
-                ).ravel()
-
-            return cp.column_stack(
-                [
-                    cp.asarray(est.decision_function(X)).ravel()
-                    for est in self.estimators_
-                ]
-            )
-
-        if self.strategy == "ovo":
-            X = check_inputs(
-                self,
-                X,
-                dtype=("float32", "float64"),
-                accept_sparse=True,
-                mem_type="device",
-            )
-
-            ids = self.pairwise_indices_
-
-            if ids is None:
-                Xs = [X] * len(self.estimators_)
-            else:
-                Xs = [X[:, idx] for idx in ids]
-
-            pred = []
-            conf = []
-
-            for est, Xi in zip(self.estimators_, Xs, strict=True):
-                p = est.predict(Xi)
-
-                if isinstance(p, ClassLabels):
-                    p = p.indices
-
-                pred.append(cp.asarray(p).ravel())
-                conf.append(self._predict_binary(est, Xi))
-
-            pred = cp.column_stack(pred)
-            conf = cp.column_stack(conf)
-
-            scr = self._ovr_decision_function(
-                pred,
-                conf,
-                len(self._classes),
-            )
-
-            if len(self._classes) == 2:
-                return scr[:, 1]
-
-            return scr
-
-        raise ValueError(
-            f"Expected `strategy` to be one of ['ovo', 'ovr'], "
-            f"got {self.strategy}"
-        )
 
 
 class OneVsRestClassifier(_BaseMulticlassClassifier):
@@ -365,6 +115,112 @@ class OneVsRestClassifier(_BaseMulticlassClassifier):
 
     strategy = "ovr"
 
+    @generate_docstring(y="dense_anydtype")
+    @mlfunc(set_input_type=True)
+    def fit(self, X, y, sample_weight=None) -> "OneVsRestClassifier":
+        """Fit one binary estimator per class on device."""
+        X, y, sample_weight, self._classes = check_inputs(
+            self,
+            X,
+            y,
+            sample_weight,
+            dtype=("float32", "float64"),
+            y_dtype=None,
+            accept_sparse=True,
+            reset=True,
+            mem_type="device",
+            return_classes=True,
+        )
+
+        n_cls = len(self._classes)
+        if n_cls == 1:
+            warnings.warn(
+                f"Label not {self._classes[0]} is present in all "
+                "training examples.",
+                stacklevel=2,
+            )
+            self.estimators_ = [_ConstantPredictor()]
+            return self
+
+        ids = (1,) if n_cls == 2 else range(n_cls)
+        self.estimators_ = []
+        for i in ids:
+            target = (y == i).astype(cp.int32)
+            fit_kwargs = (
+                {}
+                if sample_weight is None
+                else {"sample_weight": sample_weight}
+            )
+            self.estimators_.append(
+                clone(self.estimator).fit(X, target, **fit_kwargs)
+            )
+        return self
+
+    @generate_docstring(
+        return_values={
+            "name": "preds",
+            "type": "dense",
+            "description": "Predicted values",
+            "shape": "(n_samples, 1)",
+        }
+    )
+    @mlfunc(preserve_index=True)
+    def predict(self, X):
+        """Predict class labels from binary estimator scores."""
+        return ClassLabels(self._predict_indices(X), self._classes)
+
+    def _predict_indices(self, X):
+        check_is_fitted(self)
+        X = check_inputs(
+            self,
+            X,
+            dtype=("float32", "float64"),
+            accept_sparse=True,
+            mem_type="device",
+        )
+        if len(self.estimators_) == 1:
+            est = self.estimators_[0]
+            idx = (_predict_binary(est, X) > _binary_threshold(est)).astype(
+                cp.intp
+            )
+        else:
+            scores = cp.column_stack(
+                [_predict_binary(est, X) for est in self.estimators_]
+            )
+            idx = cp.argmax(scores, axis=1)
+        return idx
+
+    @generate_docstring(
+        return_values={
+            "name": "results",
+            "type": "dense",
+            "description": "Decision function values",
+            "shape": "(n_samples, 1)",
+        }
+    )
+    @mlfunc(preserve_index=True)
+    def decision_function(self, X):
+        """Return binary estimator decision scores."""
+        return self._decision_scores(X)
+
+    def _decision_scores(self, X):
+        check_is_fitted(self)
+        X = check_inputs(
+            self,
+            X,
+            dtype=("float32", "float64"),
+            accept_sparse=True,
+            mem_type="device",
+        )
+        if len(self.estimators_) == 1:
+            return cp.asarray(self.estimators_[0].decision_function(X)).ravel()
+        return cp.column_stack(
+            [
+                cp.asarray(est.decision_function(X)).ravel()
+                for est in self.estimators_
+            ]
+        )
+
 
 class OneVsOneClassifier(_BaseMulticlassClassifier):
     """
@@ -409,3 +265,118 @@ class OneVsOneClassifier(_BaseMulticlassClassifier):
     """
 
     strategy = "ovo"
+
+    @generate_docstring(y="dense_anydtype")
+    @mlfunc(set_input_type=True)
+    def fit(self, X, y, sample_weight=None) -> "OneVsOneClassifier":
+        """Fit one binary estimator per class pair on device."""
+        X, y, sample_weight, self._classes = check_inputs(
+            self,
+            X,
+            y,
+            sample_weight,
+            dtype=("float32", "float64"),
+            y_dtype=None,
+            accept_sparse=True,
+            reset=True,
+            mem_type="device",
+            return_classes=True,
+        )
+
+        n_cls = len(self._classes)
+        if n_cls == 1:
+            raise ValueError(
+                "OneVsOneClassifier can not be fit when only one class is "
+                "present."
+            )
+
+        pairwise = get_tags(self.estimator).input_tags.pairwise
+        if cp_sp.issparse(X):
+            X = X.tocsr()
+
+        self.estimators_ = []
+        self.pairwise_indices_ = [] if pairwise else None
+        for i in range(n_cls):
+            for j in range(i + 1, n_cls):
+                idx = cp.flatnonzero((y == i) | (y == j))
+                Xi = X[idx]
+                if pairwise:
+                    Xi = Xi[:, idx]
+                    self.pairwise_indices_.append(idx)
+                yi = (y[idx] == j).astype(cp.int32)
+                fit_kwargs = (
+                    {}
+                    if sample_weight is None
+                    else {"sample_weight": sample_weight[idx]}
+                )
+                self.estimators_.append(
+                    clone(self.estimator).fit(Xi, yi, **fit_kwargs)
+                )
+        return self
+
+    @generate_docstring(
+        return_values={
+            "name": "preds",
+            "type": "dense",
+            "description": "Predicted values",
+            "shape": "(n_samples, 1)",
+        }
+    )
+    @mlfunc(preserve_index=True)
+    def predict(self, X):
+        """Predict labels from pairwise votes and confidence."""
+        return ClassLabels(self._predict_indices(X), self._classes)
+
+    def _predict_indices(self, X):
+        check_is_fitted(self)
+        scores = self._decision_scores(X)
+        if len(self._classes) == 2:
+            cut = _binary_threshold(self.estimators_[0])
+            idx = (scores > cut).astype(cp.intp)
+        else:
+            idx = cp.argmax(scores, axis=1)
+        return idx
+
+    @generate_docstring(
+        return_values={
+            "name": "results",
+            "type": "dense",
+            "description": "Decision function values",
+            "shape": "(n_samples, 1)",
+        }
+    )
+    @mlfunc(preserve_index=True)
+    def decision_function(self, X):
+        """Combine pairwise votes with normalized confidence."""
+        return self._decision_scores(X)
+
+    def _decision_scores(self, X):
+        check_is_fitted(self)
+        X = check_inputs(
+            self,
+            X,
+            dtype=("float32", "float64"),
+            accept_sparse=True,
+            mem_type="device",
+        )
+        indices = self.pairwise_indices_
+        Xs = (
+            [X] * len(self.estimators_)
+            if indices is None
+            else [X[:, idx] for idx in indices]
+        )
+        predictions = []
+        confidences = []
+        for est, Xi in zip(self.estimators_, Xs, strict=True):
+            pred = est.predict(Xi)
+            if isinstance(pred, ClassLabels):
+                pred = pred.indices
+            predictions.append(cp.asarray(pred).ravel())
+            confidences.append(_predict_binary(est, Xi))
+
+        scores = _ovr_decision_function(
+            cp.column_stack(predictions),
+            cp.column_stack(confidences),
+            len(self._classes),
+        )
+        return scores[:, 1] if len(self._classes) == 2 else scores

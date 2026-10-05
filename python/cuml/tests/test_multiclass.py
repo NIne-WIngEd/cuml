@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 import cupy as cp
@@ -8,6 +8,7 @@ from sklearn import multiclass as sk_multiclass
 from sklearn.base import BaseEstimator
 from sklearn.exceptions import NotFittedError
 
+from cuml import SVC as cuSVC
 from cuml import LogisticRegression as cuLog
 from cuml import multiclass as cu_multiclass
 from cuml.testing.datasets import make_classification_dataset
@@ -130,6 +131,54 @@ def test_ovr_single_class():
     assert len(cls.estimators_) == 1
     assert bool(cp.all(cls.predict(X) == 7))
     assert bool(cp.all(cls.decision_function(X) == 0))
+    assert cls.decision_function(X).dtype.kind == "f"
+
+
+@pytest.mark.parametrize(
+    "classifier_cls",
+    [
+        cu_multiclass.OneVsRestClassifier,
+        cu_multiclass.OneVsOneClassifier,
+    ],
+)
+def test_sample_weight(classifier_cls):
+    X = np.arange(12, dtype=np.float64).reshape(6, 2)
+    y = np.repeat(np.arange(3), 2)
+    sample_weight = np.array([0.1, 0.1, 10.0, 10.0, 0.5, 0.5])
+    X_test = X[[0, 3, 5]]
+    y_test = y[[0, 3, 5]]
+
+    model = classifier_cls(cuSVC(kernel="rbf")).fit(
+        X, y, sample_weight=sample_weight
+    )
+
+    np.testing.assert_array_equal(model.predict(X_test), [1, 1, 2])
+    assert model.score(X_test, y_test) == pytest.approx(2 / 3)
+
+
+def test_svc_multiclass_integration():
+    X = cp.asarray(
+        [
+            [-4, -4],
+            [-3, -4],
+            [-4, -3],
+            [0, 4],
+            [1, 4],
+            [0, 5],
+            [4, -4],
+            [5, -4],
+            [4, -3],
+        ],
+        dtype=cp.float32,
+    )
+    y = cp.asarray([2, 2, 2, 4, 4, 4, 9, 9, 9], dtype=cp.int32)
+
+    model = cuSVC(C=10, decision_function_shape="ovo").fit(X, y)
+
+    cp.testing.assert_array_equal(model.predict(X), y)
+    assert model.support_.size > 0
+    assert model.intercept_.size == 3
+    assert model.n_iter_.size == 3
 
 
 @pytest.mark.parametrize("strategy", ["ovr", "ovo"])

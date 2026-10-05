@@ -18,7 +18,7 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
-#include <cub/cub.cuh>
+#include <cub/device/device_segmented_reduce.cuh>
 #include <cuda/std/tuple>
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
@@ -160,7 +160,6 @@ void get_stability_scores(const raft::handle_t& handle,
                           value_t* result,
                           value_idx* label_map)
 {
-  auto stream      = handle.get_stream();
   auto exec_policy = handle.get_thrust_policy();
 
   /**
