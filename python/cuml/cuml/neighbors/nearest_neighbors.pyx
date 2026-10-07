@@ -413,7 +413,7 @@ def _ivfpq_dtype_code(val, name, allowed):
     return codes[dt]
 
 
-def _normalize_ivf_params(algo, params):
+def _normalize_ivf_params(algo, params, n_rows=None):
     """Normalize IVF defaults, aliases, and supported parameters."""
     if algo == "ivfflat":
         defaults = {
@@ -497,6 +497,14 @@ def _normalize_ivf_params(algo, params):
 
     out = {**defaults, **params}
 
+    if n_rows is not None and "n_lists" not in params:
+        # Keep the cuVS default for large datasets, but do not request more
+        # lists than rows selected for k-means training on a small dataset.
+        train_rows = max(1, int(n_rows * out["kmeans_trainset_fraction"]))
+        out["n_lists"] = min(out["n_lists"], train_rows)
+        if "n_probes" not in params:
+            out["n_probes"] = min(out["n_probes"], out["n_lists"])
+
     if algo == "ivfpq":
         if out["pq_dim"] < 0:
             raise ValueError("pq_dim must be greater than or equal to 0")
@@ -519,8 +527,8 @@ cdef class ApproxIndex:
         if self.index != NULL:
             del self.index
 
-    cdef _init_ivfflat(self, IVFFlatParam *out, params):
-        params = _normalize_ivf_params("ivfflat", params)
+    cdef _init_ivfflat(self, IVFFlatParam *out, params, int n_rows):
+        params = _normalize_ivf_params("ivfflat", params, n_rows)
         out.nlist = params["n_lists"]
         out.nprobe = params["n_probes"]
         out.kmeans_n_iters = params["kmeans_n_iters"]
@@ -529,8 +537,8 @@ cdef class ApproxIndex:
             params["conservative_memory_allocation"]
         )
 
-    cdef _init_ivfpq(self, IVFPQParam *out, params):
-        params = _normalize_ivf_params("ivfpq", params)
+    cdef _init_ivfpq(self, IVFPQParam *out, params, int n_rows):
+        params = _normalize_ivf_params("ivfpq", params, n_rows)
         out.nlist = params["n_lists"]
         out.nprobe = params["n_probes"]
         out.kmeans_n_iters = params["kmeans_n_iters"]
@@ -585,12 +593,13 @@ cdef class ApproxIndex:
         cdef IVFFlatParam flat_params
         cdef IVFPQParam pq_params
         cdef knnIndexParam *build_params
+        cdef int n_rows = X.shape[0]
 
         if algorithm == "ivfflat":
-            self._init_ivfflat(&flat_params, params)
+            self._init_ivfflat(&flat_params, params, n_rows)
             build_params = &flat_params
         elif algorithm == "ivfpq":
-            self._init_ivfpq(&pq_params, params)
+            self._init_ivfpq(&pq_params, params, n_rows)
             build_params = &pq_params
         else:
             raise ValueError("algorithm must be one of {'ivfflat', 'ivfpq'}")
@@ -599,7 +608,6 @@ cdef class ApproxIndex:
         cdef DistanceType distance_type = _metric_to_distance_type(metric)
         cdef handle_t* handle_ = <handle_t*><uintptr_t>handle.getHandle()
         cdef float* X_ptr = <float*><uintptr_t>X.data.ptr
-        cdef int n_rows = X.shape[0]
         cdef int n_cols = X.shape[1]
 
         with nogil:
@@ -1214,7 +1222,8 @@ class NearestNeighbors(NeighborsBase):
 
         Parameters for algorithm ``'ivfflat'``:
 
-            - n_lists: (int, default=1024) number of inverted lists
+            - n_lists: (int, default=1024) number of inverted lists; the
+              default is capped at the number of k-means training rows
             - n_probes: (int, default=20) lists searched per query
             - kmeans_n_iters: (int, default=20) k-means iterations
             - kmeans_trainset_fraction: (float, default=0.5) fraction of the
@@ -1224,7 +1233,8 @@ class NearestNeighbors(NeighborsBase):
 
         Parameters for algorithm ``'ivfpq'``:
 
-            - n_lists: (int, default=1024) number of inverted lists
+            - n_lists: (int, default=1024) number of inverted lists; the
+              default is capped at the number of k-means training rows
             - n_probes: (int, default=20) lists searched per query
             - kmeans_n_iters: (int, default=20) k-means iterations
             - kmeans_trainset_fraction: (float, default=0.5) fraction of the
