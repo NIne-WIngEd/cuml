@@ -5,7 +5,7 @@ import warnings
 
 import cupy as cp
 import cupyx.scipy.sparse as cp_sp
-from sklearn.base import clone, is_classifier, is_regressor
+from sklearn.base import BaseEstimator, clone, is_classifier, is_regressor
 from sklearn.utils import get_tags
 
 from cuml.common.doc_utils import generate_docstring
@@ -15,7 +15,7 @@ from cuml.internals.outputs import ClassLabels, mlfunc
 from cuml.internals.validation import check_inputs, check_is_fitted
 
 
-class _ConstantPredictor:
+class _ConstantPredictor(BaseEstimator):
     def predict(self, X):
         return cp.zeros(X.shape[0], dtype=cp.int32)
 
