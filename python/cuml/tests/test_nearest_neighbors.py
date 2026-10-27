@@ -345,6 +345,47 @@ def test_ivfpq_negative_pq_dim():
         ).fit(X)
 
 
+def test_ivfpq_flat_codes_layout_rejected():
+    X, _ = make_blobs(n_samples=32, n_features=8, random_state=0)
+
+    with pytest.raises(ValueError, match="codes_layout='flat' is not supported"):
+        cuKNN(
+            algorithm="ivfpq",
+            algo_params={"codes_layout": "flat"},
+        ).fit(X)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=RuntimeError,
+    reason="cuVS IVF-PQ GPU search does not support flat codes layout",
+)
+def test_cuvs_ivfpq_flat_layout_search_unsupported():
+    ivf_pq = pytest.importorskip("cuvs.neighbors.ivf_pq")
+    from cuvs.common.exceptions import CuvsException
+
+    X = cp.random.RandomState(0).rand(512, 32).astype(cp.float32)
+    params = ivf_pq.IndexParams(n_lists=8, pq_dim=8, codes_layout="flat")
+
+    try:
+        index = ivf_pq.build(params, X)
+    except Exception as exc:
+        raise AssertionError("cuVS could not build a flat-layout index") from exc
+
+    try:
+        ivf_pq.search(ivf_pq.SearchParams(n_probes=8), index, X[:4], 4)
+    except CuvsException as exc:
+        expected = (
+            "IVF-PQ search requires INTERLEAVED codes layout. "
+            "FLAT layout is not supported for GPU search."
+        )
+        if expected not in str(exc):
+            raise AssertionError("cuVS rejected search for another reason") from exc
+        raise RuntimeError("cuVS flat-layout GPU search is unsupported") from exc
+    except Exception as exc:
+        raise AssertionError("cuVS search failed for another reason") from exc
+
+
 @pytest.mark.parametrize(
     "algorithm,algo_params",
     [

@@ -144,7 +144,7 @@ struct IVFPQParam : IVFParam {
   int n_bits;
   bool usePrecomputedTables             = false;  ///< Deprecated and ignored.
   int codebook_kind                     = 0;      ///< 0=PER_SUBSPACE, 1=PER_CLUSTER.
-  int codes_layout                      = 1;      ///< 0=FLAT, 1=INTERLEAVED.
+  int codes_layout                      = 1;      ///< GPU search requires 1=INTERLEAVED.
   bool force_random_rotation            = false;  ///< Always apply a random rotation.
   uint32_t max_train_points_per_pq_code = 256;    ///< Training points per PQ code.
   int lut_dtype                         = 0;      ///< 0=float32, 1=float16, 2=uint8.

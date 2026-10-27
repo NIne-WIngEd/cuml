@@ -318,8 +318,8 @@ void approx_knn_build_index(raft::handle_t& handle,
     params.pq_dim                   = ML::narrow_cast<uint32_t>(ivf_pq_pams->M);
     RAFT_EXPECTS(ivf_pq_pams->codebook_kind == 0 || ivf_pq_pams->codebook_kind == 1,
                  "Invalid IVF-PQ codebook_kind.");
-    RAFT_EXPECTS(ivf_pq_pams->codes_layout == 0 || ivf_pq_pams->codes_layout == 1,
-                 "Invalid IVF-PQ codes_layout.");
+    RAFT_EXPECTS(ivf_pq_pams->codes_layout == 1,
+                 "GPU IVF-PQ search requires interleaved codes layout.");
 
     params.codebook_kind =
       static_cast<cuvs::neighbors::ivf_pq::codebook_gen>(ivf_pq_pams->codebook_kind);

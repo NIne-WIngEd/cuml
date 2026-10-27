@@ -509,6 +509,12 @@ def _normalize_ivf_params(algo, params, n_rows=None):
             out["n_probes"] = min(out["n_probes"], out["n_lists"])
 
     if algo == "ivfpq":
+        if out["codes_layout"] == "flat":
+            raise ValueError(
+                "codes_layout='flat' is not supported for GPU IVF-PQ search; "
+                "use 'interleaved'"
+            )
+
         if out["pq_dim"] < 0:
             raise ValueError("pq_dim must be greater than or equal to 0")
 
@@ -561,9 +567,7 @@ cdef class ApproxIndex:
             raise ValueError(f"Incorrect codebook kind {kind!r}")
 
         layout = params["codes_layout"]
-        if layout == "flat":
-            out.codes_layout = 0
-        elif layout == "interleaved":
+        if layout == "interleaved":
             out.codes_layout = 1
         else:
             raise ValueError(f"Incorrect codes layout {layout!r}")
@@ -1250,8 +1254,9 @@ class NearestNeighbors(NeighborsBase):
               must be between 4 and 8
             - codebook_kind: ({'subspace', 'cluster'}, default='subspace')
               method used to construct PQ codebooks
-            - codes_layout: ({'flat', 'interleaved'}, default='interleaved')
-              memory layout used for PQ codes
+            - codes_layout: ({'interleaved'}, default='interleaved')
+              memory layout used for PQ codes; cuVS does not support GPU
+              search on flat-layout indices
             - force_random_rotation: (bool, default=False) always apply a
               random rotation before product quantization
             - conservative_memory_allocation: (bool, default=False) allocate
