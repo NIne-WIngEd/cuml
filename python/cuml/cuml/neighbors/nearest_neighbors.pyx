@@ -528,6 +528,12 @@ def _normalize_ivf_params(algo, params, n_rows=None):
     return out
 
 
+def _ivfpq_training_rows(n_rows, n_lists, train_fraction):
+    """Match the integer subsampling ratio used by cuVS IVF-PQ training."""
+    trainset_size = max(int(n_rows * train_fraction), n_lists)
+    return n_rows // max(1, n_rows // trainset_size)
+
+
 cdef class ApproxIndex:
     """An approximate nearest neighbors index (IVFQ or IVFFlat)"""
     cdef knnIndex* index
@@ -591,6 +597,27 @@ cdef class ApproxIndex:
             ("float32", "float16", "int8"),
         )
         out.max_internal_batch_size = params["max_internal_batch_size"]
+
+        # cuVS subsamples the coarse training set, then trains a PQ codebook
+        # with 2**pq_bits centers. Both that codebook and the inverted lists
+        # need enough training rows. Match cuVS's integer subsampling ratio.
+        if out.nlist > 0 and 4 <= out.n_bits <= 8:
+            train_rows = _ivfpq_training_rows(
+                n_rows,
+                out.nlist,
+                params["kmeans_trainset_fraction"],
+            )
+            required_rows = max(out.nlist, 1 << out.n_bits)
+            if train_rows < required_rows:
+                raise ValueError(
+                    f"X has {n_rows} rows, but algorithm='ivfpq' with "
+                    f"pq_bits={out.n_bits} and n_lists={out.nlist} provides "
+                    f"only {train_rows} training rows; at least "
+                    f"{required_rows} are required. Provide more rows, "
+                    "increase algo_params['kmeans_trainset_fraction'], or "
+                    "reduce algo_params['pq_bits'] and/or "
+                    "algo_params['n_lists']."
+                )
 
     @staticmethod
     def build(X, metric, algorithm, params=None, float p=2):
@@ -1279,6 +1306,12 @@ class NearestNeighbors(NeighborsBase):
             ``pq_bits`` instead. ``usePrecomputedTables`` was also
             deprecated in 26.12 and will be removed in 27.02; it is ignored
             because cuVS IVF-PQ has no equivalent option.
+
+        IVF-PQ needs at least ``2**pq_bits`` training rows, as well as at
+        least ``n_lists`` training rows. With the default ``pq_bits=8`` and
+        training fraction of 0.5, at least 512 input rows are typically
+        needed. Increasing ``kmeans_trainset_fraction`` can reduce that
+        input-row minimum.
     metric_params : dict, optional (default = None)
         Additional keyword arguments for the metric function.
     n_jobs : int (default = None)
